@@ -1,0 +1,235 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r} 
+pacman::p_load("tidyverse","readxl","stringr","limma", "edgeR", "gplots", "ggplot2","ComplexHeatmap","dendextend","vsn", "circlize", "Homo.sapiens", "AnnotationDbi", "tidyHeatmap", "openxlsx")
+```
+
+## CLEAN UP + ANNOTATION ##
+```{r}
+#read in data table and summary table
+rawdata <- read.table("data/normalisedprots_2022.txt", sep = "\t", check.names = FALSE, header = TRUE, row.names = c(1))
+sampledata <- read_tsv("data/sampledata_fibres.txt", col_names = TRUE)
+```
+
+#get annotations
+```{r}
+#annotations
+anno <- read.csv("data/MitoCarta3.0.csv",  header = TRUE, na = "0")
+anno_IMPI <- read_tsv("data/IMPI.txt", col_names = TRUE)
+
+key <- rownames(rawdata)
+dictionary <- AnnotationDbi::select(Homo.sapiens, keys=key, columns=c("SYMBOL", "GENENAME"), keytype = "UNIPROT")
+dictionary <- dictionary[!duplicated(dictionary$UNIPROT), ]
+```
+
+#Log data and merge to annotations
+```{r}
+loggeddata <- log2(rawdata)
+loggeddata$UNIPROT <- rownames(loggeddata)
+
+mergedanno_data <- merge(loggeddata, dictionary, all.x=TRUE)
+```
+
+```{r}
+#annotation of proteins -  total 1623
+mergedanno <- merge(mergedanno_data, anno_IMPI, by.x = "SYMBOL", by.y = "Gene.symbol", all.x = TRUE)
+mergedanno$Gene.mitoEvidenceIMPI <- mergedanno$Gene.mitoEvidenceIMPI %>% replace_na("Non mitochondrial")
+
+#just known mitos
+mitosub <- filter(mergedanno, Gene.mitoEvidenceIMPI == "Known mitochondrial")
+rownames(mitosub) <- mitosub$SYMBOL
+```
+## ALL PROTS ##
+
+#just look at all proteins first, tidytable
+```{r}
+allprots <- mergedanno[c(1:92,100)]
+allprotslong <- allprots %>% gather("sample","intensity", -UNIPROT, -SYMBOL, -Gene.mitoEvidenceIMPI)
+allprotslong_sep <- allprotslong %>% separate(sample, c("subject", "training", "time", "fibre"))
+```
+
+#to zscore/scale
+```{r}
+allprotslong_zscore <- allprotslong_sep %>% group_by(SYMBOL) %>% mutate(zscore_intensity = scale(intensity)) 
+allprotslong_zscore$time <- factor(allprotslong_zscore$time, c("PRE", "POST"))
+```
+
+```{r}
+rownames(loggeddata) <- loggeddata$UNIPROT
+protsdata <- loggeddata[-c(91)]
+
+
+targets <- sampledata[c(2:5,8)]
+contrasts <- factor(paste(targets$training,targets$time,targets$fibre,sep="."))
+design <- model.matrix(~0+contrasts)
+colnames(design) <- levels(contrasts)               
+                      
+symbol <- mergedanno[c(1:2)]
+```
+
+#Comparison PREs IvsII
+```{r}
+fit <- lmFit(protsdata,design)
+
+cm <- makeContrasts(
+  PRE_IvsII_M = (M.PRE.II) - (M.PRE.I),
+  PRE_IvsII_S = (S.PRE.II) - (S.PRE.I),
+  PRE_IvsII = (M.PRE.II+S.PRE.II)/2 - (M.PRE.I+S.PRE.I)/2,
+levels=design)
+
+fit2 <- contrasts.fit(fit, cm)
+fit2 <- eBayes(fit2)
+
+#comparisons
+comparison_PRE <- topTable(fit2, coef="PRE_IvsII", n=Inf)
+comp_posthoc_PRE <- subset(comparison_PRE, comparison_PRE$adj.P.Val<0.05)
+
+comparison_MPRE <- topTable(fit2, coef="PRE_IvsII_M", n=Inf)
+comp_posthoc_MPRE <- subset(comparison_MPRE, comparison_MPRE$adj.P.Val<0.05)
+
+comparison_SPRE <- topTable(fit2, coef="PRE_IvsII_S", n=Inf)
+comp_posthoc_SPRE <- subset(comparison_SPRE, comparison_SPRE$adj.P.Val<0.05)
+```
+
+#Volcano Plot and Heatmap PRE
+```{r}
+comp_posthoc_PRE$uniprot <- rownames(comp_posthoc_PRE) 
+comp_posthoc_PRE <- merge(comp_posthoc_PRE, symbol, by.x = "uniprot", by.y = "UNIPROT", all.x = TRUE)
+deprots_PRE <- comp_posthoc_PRE$uniprot
+deprots_PRE <- as.data.frame(deprots_PRE)
+
+#merge with zscored data
+DEzscore_wide <- allprotslong_zscore %>% unite("sample", "subject", "training", "time", "fibre", sep = "-")
+DEzscore_wide <- DEzscore_wide[c(2,4,6)]
+DEzscore_wide <- DEzscore_wide %>% filter(UNIPROT %in% deprots_PRE$deprots_PRE)  
+DEzscore_wide <- DEzscore_wide %>% spread(sample, zscore_intensity)
+DEzscore_wide <- as.data.frame(DEzscore_wide)
+rownames(DEzscore_wide) <- DEzscore_wide$UNIPROT
+DEzscore_wide <- DEzscore_wide[-c(1)]
+
+dendrow <- DEzscore_wide %>% dist(method = "euclidean") %>% hclust(method = "average") %>% as.dendrogram
+dendcol <- t(DEzscore_wide) %>% dist(method = "euclidean") %>% hclust(method = "average") %>% as.dendrogram
+
+symbols <- mergedanno[c(1,2)]
+DEzscore_wide_sym <- DEzscore_wide 
+DEzscore_wide_sym$uniprot <- rownames(DEzscore_wide_sym)
+DEzscore_wide_sym <- merge(DEzscore_wide_sym, symbols, by.x = "uniprot", by.y = "UNIPROT")
+rownames(DEzscore_wide_sym) <- DEzscore_wide_sym$SYMBOL
+DEzscore_wide_sym <- DEzscore_wide_sym[-c(1,92)]
+
+
+#annotation
+cols <- list(fibre=c("I"="blue", "II"="red"))
+sampleanno_cols <- colnames(DEzscore_wide)
+sampleanno_cols <- as.data.frame(sampleanno_cols) %>% separate(sampleanno_cols, c("subject", "training", "time", "fibre")) 
+colAnn <- HeatmapAnnotation(df=sampleanno_cols[c(4)], which="col", col=cols, annotation_width=unit(c(1, 4), "cm"), gap=unit(1, "mm"))
+col = colorRamp2(c(-2, 0, 2), c("#758BFD", "white", "#2FC6B7"))
+
+Heatmap(as.matrix(DEzscore_wide_sym),col = col, cluster_rows = dendrow, cluster_columns = dendcol, row_dend_width = unit(2, "cm"), row_names_gp = gpar(fontsize = 10), bottom_annotation = colAnn, show_column_names = FALSE, show_row_dend = FALSE)
+
+```
+
+```{r}
+library(EnhancedVolcano)
+
+comparison_PRE$uniprot <- rownames(comparison_PRE) 
+comparison_PRE <- merge(comparison_PRE, symbol, by.x = "uniprot", by.y = "UNIPROT", all.x = TRUE)
+
+comp_posthoc_PRE$uniprot <- rownames(comp_posthoc_PRE) 
+comp_posthoc_PRE <- merge(comp_posthoc_PRE, symbol, by.x = "uniprot", by.y = "UNIPROT", all.x = TRUE)
+
+uniquelist <- read.xlsx("data/uniquelist.xlsx", colNames = FALSE)
+uniquelist$isunique <- "yes"
+comparison_PRE <- merge(comparison_PRE, uniquelist, by.x = "SYMBOL", by.y = "X1", all.x = TRUE)
+uniquelist <- uniquelist$X1
+
+keyvals <- ifelse(
+    comparison_PRE$logFC < -0.2 & comparison_PRE$adj.P.Val < 0.05, 'royalblue',
+      ifelse(comparison_PRE$logFC > 0.2 & comparison_PRE$adj.P.Val < 0.05, 'red',
+        'black'))
+  keyvals[is.na(keyvals)] <- 'black'
+  names(keyvals)[keyvals == 'red'] <- 'higher in type II'
+  names(keyvals)[keyvals == 'black'] <- 'mid'
+  names(keyvals)[keyvals == 'royalblue'] <- 'higher in type I'
+  
+
+EnhancedVolcano(comparison_PRE,
+                lab = comparison_PRE$SYMBOL,
+                x = 'logFC',
+                y = 'P.Value',
+                selectLab = uniquelist,
+                pCutoff = 0.01,
+                FCcutoff = 0.2,
+                drawConnectors = TRUE,
+                maxoverlapsConnectors = Inf,
+                lengthConnectors = unit(0.001, 'npc'),
+                typeConnectors ='closed',
+                pointSize = 5.0,
+                colCustom = keyvals,
+                shape = c(16),
+                ylim = c(0, 16),
+                xlim = c(-2, 2),
+                labSize = 6.0,
+                cutoffLineWidth=0)
+```
+
+#Which DE prots in mitos
+```{r}
+comp_posthoc_PRE <- subset(comparison_PRE, comparison_PRE$adj.P.Val<0.05)
+comp_posthoc_PRE$uniprot <- rownames(comp_posthoc_PRE) 
+comp_posthoc_PRE <- merge(comp_posthoc_PRE, symbol, by.x = "uniprot", by.y = "UNIPROT", all.x = TRUE)
+mitocheck <- comp_posthoc_PRE
+
+mitos <- read.csv("data/MitoCarta3.0.csv",  header = TRUE, na = "0")
+mitos <- mitos %>% filter(MitoCarta3.0_List == "+")
+
+mitocheck <- merge(mitocheck, mitos, by.x = "uniprot", by.y = "UniProt")
+
+```
+
+```{r}
+comp_posthoc_PRE <- subset(comparison_PRE, comparison_PRE$adj.P.Val<0.05)
+comp_posthoc_PRE$uniprot <- rownames(comp_posthoc_PRE) 
+comp_posthoc_PRE <- merge(comp_posthoc_PRE, symbol, by.x = "uniprot", by.y = "UNIPROT", all.x = TRUE)
+mitocheck <- comp_posthoc_PRE
+mitossymbol <- mitosub$SYMBOL
+mitossymbol <- as.data.frame(mitossymbol)
+mitocheck <- merge(mitocheck, mitossymbol, by.x = "SYMBOL", by.y = "mitossymbol")
+```
+
+#mito volcano
+```{r}
+mitosymbol <- mitosub[c(1,2,100)]
+mitovol <- merge(comparison_PRE, mitosymbol,  by.x="SYMBOL", by.y = "SYMBOL")
+
+adjmitos <- subset(mitovol, mitovol$adj.P.Val<0.05)
+
+keyvals <- ifelse(
+    mitovol$logFC < -0.2 & mitovol$adj.P.Val < 0.05, 'royalblue',
+      ifelse(mitovol$logFC > 0.4 & mitovol$adj.P.Val < 0.05, 'red',
+        'black'))
+  keyvals[is.na(keyvals)] <- 'black'
+  names(keyvals)[keyvals == 'red'] <- 'higher in type II'
+  names(keyvals)[keyvals == 'royalblue'] <- 'higher in type I'
+  
+
+EnhancedVolcano(mitovol,
+                lab = mitovol$SYMBOL,
+                x = 'logFC',
+                y = 'P.Value',
+                selectLab = adjmitos$SYMBOL,
+                drawConnectors = TRUE,
+                maxoverlapsConnectors = Inf,
+                lengthConnectors = unit(0.001, 'npc'),
+                typeConnectors ='closed',
+                pointSize = 5.0,
+                colCustom = keyvals,
+                shape = c(16),
+                ylim = c(0, 6),
+                xlim = c(-2, 2),
+                labSize = 6.0,
+                cutoffLineWidth=0)
+```

@@ -1,0 +1,312 @@
+
+```{r} 
+pacman::p_load("tidyverse","readxl","stringr","limma", "edgeR", "gplots", "ggplot2","ComplexHeatmap","dendextend","vsn", "circlize", "Homo.sapiens", "AnnotationDbi", "tidyHeatmap", "openxlsx")
+```
+
+## CLEAN UP + ANNOTATION ##
+```{r}
+#read in data table and summary table
+rawdata <- read.table("data/normalisedprots.txt", sep = "\t", check.names = FALSE, header = TRUE, row.names = c(1))
+sampledata <- read_tsv("data/sampledata_fibres.txt", col_names = TRUE)
+```
+
+#get annotations
+```{r}
+#annotations
+anno <- read.csv("data/MitoCarta3.csv",  header = TRUE, na = "0")
+anno_IMPI <- read_tsv("data/IMPI.txt", col_names = TRUE)
+
+key <- rownames(rawdata)
+dictionary <- AnnotationDbi::select(Homo.sapiens, keys=key, columns=c("SYMBOL", "GENENAME"), keytype = "UNIPROT")
+dictionary <- dictionary[!duplicated(dictionary$UNIPROT), ]
+```
+
+#Log data and merge to annotations
+```{r}
+loggeddata <- log2(rawdata)
+loggeddata$UNIPROT <- rownames(loggeddata)
+
+mergedanno_data <- merge(loggeddata, dictionary, all.x=TRUE)
+```
+
+```{r}
+#annotation of proteins -  total 1623
+mergedanno <- merge(mergedanno_data, anno_IMPI, by.x = "SYMBOL", by.y = "Gene.symbol", all.x = TRUE)
+mergedanno$Gene.mitoEvidenceIMPI <- mergedanno$Gene.mitoEvidenceIMPI %>% replace_na("Non mitochondrial")
+```
+
+```{r}
+allprots <- mergedanno[c(1:92,100)]
+allprotslong <- allprots %>% gather("sample","intensity", -UNIPROT, -SYMBOL, -Gene.mitoEvidenceIMPI)
+allprotslong_sep <- allprotslong %>% separate(sample, c("subject", "training", "time", "fibre"))
+```
+
+```{r}
+allprotslong_zscore <- allprotslong_sep %>% group_by(SYMBOL, subject) %>% mutate(zscore_intensity = scale(intensity)) 
+allprotslong_zscore$time <- factor(allprotslong_zscore$time, c("PRE", "POST"))
+#allprotslong_mean <- allprotslong_zscore[c(2,4,5,6,7,9)]
+
+mitosub <- filter(allprotslong_zscore, Gene.mitoEvidenceIMPI == "Known mitochondrial")
+ggplot(mitosub, aes(time,zscore_intensity,group=SYMBOL, colour = Gene.mitoEvidenceIMPI)) + geom_smooth(method = "lm", se = FALSE) + facet_grid(fibre ~ training)
+```
+
+With OXPHOS complexes added
+```{r}
+complexanno <- anno[c(1,2,9:15)]
+complexes <- merge(complexanno, allprots, by.x= "UniProt", by.y = "UNIPROT", all.y= TRUE)
+complexeslong <- complexes %>% gather("sample","intensity", -UniProt,-EnsemblGeneID, -SYMBOL, -Gene.mitoEvidenceIMPI, - ComplexSub, -CI, -CII, -CIII, -CIV, -CV, -Ribo)
+complexeslong_sep <- complexeslong %>% separate(sample, c("subject", "training", "time", "fibre"))
+complexeslong_sep_zscore <- complexeslong_sep %>% group_by(SYMBOL) %>% mutate(zscore_intensity = scale(intensity)) 
+complexeslong_sep_zscore$time <- factor(complexeslong_sep_zscore$time, c("PRE", "POST"))
+```
+
+#Mitochondrial Complex Profile Plots 
+```{r}
+mitosub2 <- filter(complexeslong_sep_zscore, Gene.mitoEvidenceIMPI == "Known mitochondrial")
+
+mitosub2[mitosub2==""] <- NA
+
+#background of all things
+bg <- mitosub2 %>% dplyr::select(-ComplexSub)
+
+mitomean <- mitosub2 %>% group_by(time, fibre, training) %>% dplyr::summarize(Mean = mean(zscore_intensity, na.rm=TRUE)) 
+mitosub2 %>% ggplot(aes(x = time, y = zscore_intensity, group = SYMBOL)) + geom_smooth(data = bg, color = "grey", se = FALSE)  + facet_grid( fibre ~ training) + theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 14), strip.text.x = element_text(size = 14),strip.text.y = element_text(size = 14)) + geom_line(aes(x = time, y = Mean, group = training), data = mitomean, colour = 'black')
+
+trainingmean <- mitosub2 %>% group_by(time, training) %>% dplyr::summarize(Mean = mean(zscore_intensity, na.rm=TRUE)) 
+mitosub2 %>% ggplot(aes(x = time, y = zscore_intensity, group = SYMBOL)) + geom_smooth(data = bg, color = "grey", se = FALSE)  + facet_grid( ~ training) + theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 14), strip.text.x = element_text(size = 14),strip.text.y = element_text(size = 14)) + geom_line(aes(x = time, y = Mean, group = training), data = trainingmean, colour = 'black')
+
+complexesmean <- mitosub2 %>% group_by(time, fibre, training, CI, CII, CIII, CIV, CV, Ribo) %>% dplyr::summarize(Mean = mean(zscore_intensity, na.rm=TRUE)) 
+complexesmeanCV <- complexesmean %>% filter(CV == "CV")
+complexesmeanCIV <- complexesmean %>% filter(CIV == "CIV")
+complexesmeanCIII <- complexesmean %>% filter(CIII == "CIII")
+complexesmeanCII <- complexesmean %>% filter(CII == "CII")
+complexesmeanCI <- complexesmean %>% filter(CI == "CI")
+complexesmeanribos <- complexesmean %>% filter(Ribo == "Ribo")
+
+#change drop_na and colour to complex of interest or for all complexes change to 'complex'
+mitosub2 %>% drop_na(CII) %>% ggplot(aes(x = time, y = zscore_intensity, group = SYMBOL)) + geom_smooth(data = bg, color = "grey", se = FALSE) + geom_smooth(aes(x = time, y = zscore_intensity, colour = CII, group = SYMBOL), color= '#ff1493', se = FALSE) + geom_line(aes(x = time, y = Mean, group = training), data = complexesmeanCII, colour = 'black') + facet_grid(fibre ~ training) + theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 14), strip.text.x = element_text(size = 14),strip.text.y = element_text(size = 14))
+```
+
+```{r}
+oxphosprots <- mitosub2
+oxphosprots <- oxphosprots %>% group_by(training, SYMBOL, fibre, time, ComplexSub, UniProt) %>% dplyr::summarize(Mean = mean(zscore_intensity, na.rm=TRUE))
+oxphosprots <- filter(oxphosprots, !is.na(ComplexSub))
+oxphosprots <- oxphosprots %>% unite("sample", fibre,training,time, remove = FALSE)
+
+oxphosprots %>% group_by(ComplexSub, training) %>%
+        heatmap(SYMBOL, sample, Mean, palette_value = circlize::colorRamp2(c(-2, 0, 2), c( "#58c3b9", "white","#6637bf")))
+```
+
+#profile plots of functional related things
+```{r}
+mitopath_TCA <- read.csv("data/mitopathways_2021-11-22.csv", header = TRUE)[,1:2]
+mitopath_FAO <-read.csv("data/mitopathways_2021-11-22.csv", header = TRUE)[,3:4]
+mitopath_DYN <- read.csv("data/mitopathways_2021-11-22.csv", header = TRUE)[,5:6]
+mitopath_GLYCO <- read.csv("data/mitopathways.csv", header = TRUE)[,7:8]
+
+mitopathmerge <- mitosub2
+mitopathmerge <- merge(mitopathmerge, mitopath_TCA, by.x="SYMBOL", by.y="TCA.cycle", all.x = TRUE)
+mitopathmerge <- merge(mitopathmerge, mitopath_FAO, by.x="SYMBOL", by.y="FATTY.ACID.OXIDATION", all.x = TRUE)
+mitopathmerge <- merge(mitopathmerge, mitopath_DYN, by.x="SYMBOL", by.y="MITOCHONDRIAL.DYNAMICS", all.x = TRUE)
+mitopathmerge <- merge(mitopathmerge, mitopath_GLYCO, by.x="SYMBOL", by.y="Glycolysis", all.x = TRUE)
+
+
+TCAavgprepost <- mitopathmerge %>% filter(TCAcycle == TCAcycle)
+FAOavgprepost <- mitopathmerge %>% filter(FAOx == FAOx)
+DYNAavgprepost <- mitopathmerge %>% filter(DYNA == DYNA)
+GLYCOavgprepost <- mitopathmerge %>% filter(GLYCO == GLYCO)
+
+
+TCAavgprepost <- TCAavgprepost %>% group_by(time, fibre, training, TCAcycle) %>% dplyr::summarize(Mean = mean(zscore_intensity, na.rm=TRUE))
+FAOavgprepost <- FAOavgprepost %>% group_by(time, fibre, training, FAOx) %>% dplyr::summarize(Mean = mean(zscore_intensity, na.rm=TRUE))
+DYNAavgprepost <- DYNAavgprepost %>% group_by(time, fibre, training,DYNA) %>% dplyr::summarize(Mean = mean(zscore_intensity, na.rm=TRUE))
+GLYCOavgprepost <- GLYCOavgprepost %>% group_by(time, fibre, training,GLYCO) %>% dplyr::summarize(Mean = mean(zscore_intensity, na.rm=TRUE))
+
+
+pathwayallavg <- rbind(TCAavgprepost, FAOavgprepost,DYNAavgprepost, GLYCOavgprepost)
+
+#background of all mitos
+bg <- mitopathmerge %>% dplyr::select(-DYNA)
+
+
+mitopathmerge %>% drop_na(DYNA) %>% ggplot(aes(x = time, y = zscore_intensity, group = SYMBOL)) + geom_smooth(data = bg, color = "grey", se = FALSE) + geom_smooth(aes(x = time, y = zscore_intensity, colour = DYNA, group = SYMBOL), color= '#5fc3aa', se = FALSE) + facet_grid(cols = vars(training), rows = vars(fibre)) + geom_line(aes(x = time, y = Mean, group = training), data = DYNAavgprepost, colour = 'black') + theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 14), strip.text.x = element_text(size = 14),strip.text.y = element_text(size = 14))
+```
+
+#zscoretable - mitos
+```{r}
+zscoremitosupp <- mitopathmerge
+zscoremitosupp <- zscoremitosupp %>% unite("sample", subject, training, time, fibre, remove = TRUE)
+zscoremitosupp <- zscoremitosupp[-c(13)]
+zscoremitosupp <- zscoremitosupp %>% spread(sample, zscore_intensity)
+```
+
+## back to everything
+
+```{r}
+ggplot(allprotslong_zscore, aes(time,zscore_intensity,group=SYMBOL)) + geom_smooth(se = FALSE) + facet_grid(fibre~training)
+
+#calculate mean
+allprots_mean <- allprotslong_zscore %>% group_by(time, fibre, training) %>% dplyr::mutate(Mean = mean(zscore_intensity, na.rm=TRUE)) 
+
+ggplot(allprotslong_zscore, aes(time,zscore_intensity,group=SYMBOL, colour = fibre)) + geom_smooth(method = "lm", se = FALSE) + geom_line(aes(x = time, y = Mean, group = training), data = allprots_mean, colour = 'black') + facet_grid(training~fibre) 
+```
+
+## GLYCO with whole cell background
+```{r}
+glycomerge <- merge(allprotslong_zscore, mitopath_GLYCO, by.x="SYMBOL", by.y="Glycolysis", all.x = TRUE)
+
+GLYCOavgprepost <- glycomerge %>% filter(GLYCO == GLYCO)
+GLYCOavgprepost <- GLYCOavgprepost %>% group_by(time, fibre, training,GLYCO) %>% dplyr::summarize(Mean = mean(zscore_intensity, na.rm=TRUE))
+
+#background of all mitos
+bg <- glycomerge %>% dplyr::select(-GLYCO)
+
+glycomerge %>% drop_na(GLYCO) %>% ggplot(aes(x = time, y = zscore_intensity, group = SYMBOL)) + geom_smooth(data = bg, color = "grey", se = FALSE) + geom_smooth(aes(x = time, y = zscore_intensity, colour = GLYCO, group = SYMBOL), color= '#5fc3aa', se = FALSE) + facet_grid(cols = vars(training), rows = vars(fibre)) + geom_line(aes(x = time, y = Mean, group = training), data = GLYCOavgprepost, colour = 'black') + theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 14), strip.text.x = element_text(size = 14),strip.text.y = element_text(size = 14))
+```
+
+
+```{r}
+rownames(loggeddata) <- loggeddata$UNIPROT
+protsdata <- loggeddata[-c(91)]
+targets <- sampledata[c(2:5,8)]
+contrasts <- factor(paste(targets$training,targets$time,targets$fibre,sep="."))
+design <- model.matrix(~0+contrasts)
+colnames(design) <- levels(contrasts)               
+                      
+symbol <- mergedanno[c(1:2)]
+```
+
+#NEED TO CHANGE CONTRASTS TO DO NEW COMPARISONS
+#Comparison PREvsPOST : each exercise type and each fibre type
+```{r}
+fit <- lmFit(protsdata,design)
+
+cm <- makeContrasts(
+  M_PREvsPOST_I = (M.POST.I) - (M.PRE.I),
+  M_PREvsPOST_II = (M.POST.II) - (M.PRE.II),
+  S_PREvsPOST_I = (S.POST.I) - (S.PRE.I),
+  S_PREvsPOST_II = (S.POST.II) - (S.PRE.II),
+levels=design)
+
+fit2 <- contrasts.fit(fit, cm)
+fit2 <- eBayes(fit2)
+
+#comparisons
+comp_MI <- topTable(fit2, coef="M_PREvsPOST_I", n=Inf)
+comp_MI_posthoc <- subset(comp_MI, comp_MI$adj.P.Val<0.05)
+comp_MI$uniprot <- rownames(comp_MI) 
+comp_MI <- merge(comp_MI, symbol, by.x = "uniprot", by.y = "UNIPROT", all.x = TRUE)
+
+comp_MII <- topTable(fit2, coef="M_PREvsPOST_II", n=Inf)
+comp_MII_posthoc <- subset(comp_MII, comp_MII$adj.P.Val<0.05)
+comp_MII$uniprot <- rownames(comp_MII) 
+comp_MII <- merge(comp_MII, symbol, by.x = "uniprot", by.y = "UNIPROT", all.x = TRUE)
+
+comp_SI <- topTable(fit2, coef="S_PREvsPOST_I", n=Inf)
+comp_SI_posthoc <- subset(comp_SI, comp_SI$adj.P.Val<0.05)
+comp_SI$uniprot <- rownames(comp_SI) 
+comp_SI <- merge(comp_SI, symbol, by.x = "uniprot", by.y = "UNIPROT", all.x = TRUE)
+
+comp_SII <- topTable(fit2, coef="S_PREvsPOST_II", n=Inf)
+comp_SII_posthoc <- subset(comp_SII, comp_SII$adj.P.Val<0.05)
+comp_SII$uniprot <- rownames(comp_SII) 
+comp_SII <- merge(comp_SII, symbol, by.x = "uniprot", by.y = "UNIPROT", all.x = TRUE)
+```
+
+```{r}
+library(EnhancedVolcano)
+
+keyvals <- ifelse(
+    comp_MI$logFC < -0.2, '#41bfb3',
+      ifelse(comp_MI$logFC > 0.2, '#65449b',
+        'black'))
+  keyvals[is.na(keyvals)] <- 'black'
+  names(keyvals)[keyvals == '#65449b'] <- 'POST'
+  names(keyvals)[keyvals == 'black'] <- 'mid'
+  names(keyvals)[keyvals == '#41bfb3'] <- 'PRE'
+  
+
+  EnhancedVolcano(comp_MI,
+                lab = comp_MI$SYMBOL,
+                x = 'logFC',
+                y = 'adj.P.Val',
+                pCutoff = 0.05,
+                FCcutoff = 0.2,
+                drawConnectors = TRUE,
+                maxoverlapsConnectors = Inf,
+                lengthConnectors = unit(0.001, 'npc'),
+                typeConnectors ='closed',
+                pointSize = 5.0,
+                colCustom = keyvals,
+                shape = c(16),
+                ylim = c(0, 2.5),
+                xlim = c(-2, 2),
+                labSize = 6.0,
+                cutoffLineWidth=0)
+```
+
+## MICT/SIT POST IvII ##
+```{r}
+fit <- lmFit(protsdata,design)
+
+cm <- makeContrasts(
+  M_POST_IvII = (M.POST.II) - (M.POST.I),
+  S_POST_IvII = (S.POST.II) - (S.POST.I),
+levels=design)
+
+fit2 <- contrasts.fit(fit, cm)
+fit2 <- eBayes(fit2)
+
+#comparisons
+comp_M_POST_IvII <- topTable(fit2, coef="M_POST_IvII", n=Inf)
+comp_M_POST_IvII_posthoc <- subset(comp_M_POST_IvII, comp_M_POST_IvII$adj.P.Val<0.05)
+comp_M_POST_IvII$uniprot <- rownames(comp_M_POST_IvII) 
+comp_M_POST_IvII <- merge(comp_M_POST_IvII, symbol, by.x = "uniprot", by.y = "UNIPROT", all.x = TRUE)
+
+comp_S_POST_IvII <- topTable(fit2, coef="S_POST_IvII", n=Inf)
+comp_S_POST_IvII_posthoc <- subset(comp_S_POST_IvII, comp_S_POST_IvII$adj.P.Val<0.05)
+comp_S_POST_IvII$uniprot <- rownames(comp_S_POST_IvII) 
+comp_S_POST_IvII <- merge(comp_S_POST_IvII, symbol, by.x = "uniprot", by.y = "UNIPROT", all.x = TRUE)
+```
+
+```{r}
+library(EnhancedVolcano)
+
+keyvals <- ifelse(
+    comp_S_POST_IvII$logFC < -0.2, 'royalblue',
+      ifelse(comp_S_POST_IvII$logFC > 0.2, 'red',
+        'black'))
+  keyvals[is.na(keyvals)] <- 'black'
+  names(keyvals)[keyvals == 'red'] <- 'higher in type II'
+  names(keyvals)[keyvals == 'black'] <- 'mid'
+  names(keyvals)[keyvals == 'royalblue'] <- 'higher in type I'
+  
+
+EnhancedVolcano(comp_S_POST_IvII,
+                lab = comp_S_POST_IvII$SYMBOL,
+                x = 'logFC',
+                y = 'P.Value',
+                pCutoff = 0.0001,
+                FCcutoff = 0.5,
+                drawConnectors = TRUE,
+                maxoverlapsConnectors = Inf,
+                lengthConnectors = unit(0.001, 'npc'),
+                typeConnectors ='closed',
+                pointSize = 5.0,
+                colCustom = keyvals,
+                shape = c(16),
+                ylim = c(0, 12),
+                xlim = c(-2, 2),
+                labSize = 6.0,
+                cutoffLineWidth=0)
+```
+
+#mito for MPE
+```{r}
+rawdata
+rawdata$uniprot <- rownames(rawdata)
+mergedanno_mitos <- merge(rawdata, dictionary, by.x = "uniprot", by.y= "UNIPROT")
+mergedanno_mitos <- merge(mergedanno_mitos, anno_IMPI, by.x = "SYMBOL", by.y = "Gene.symbol", all.x = TRUE)
+mergedanno_mitos <- filter(mergedanno_mitos, Gene.mitoEvidenceIMPI == "Known mitochondrial")
+```
+

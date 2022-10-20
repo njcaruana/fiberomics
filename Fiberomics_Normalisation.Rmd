@@ -1,0 +1,213 @@
+---
+title: "combattrial_liz"
+author: "nikeisha"
+date: "23/10/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+pacman::p_load("dplyr", "tidyverse","readxl","stringr","limma", "edgeR", "gplots", "ggplot2","ComplexHeatmap","dendextend", "imputeLCMD","vsn", "circlize", "COMBAT", "sva")
+
+```
+
+```{r}
+# read input file
+file_input <- file.choose()
+
+raw_data <-read_xlsx(file_input)
+dim(raw_data)
+head(raw_data)
+
+high_confi_no_contam <- raw_data %>%
+  #remove low and mid confidence proteins and contaminants
+  filter(`Protein FDR Confidence: Combined` == "High", Contaminant =="FALSE", `# Unique Peptides` > 1) %>%
+  # select normalized abundance reporter ion intensity
+  dplyr::select(Accession, Description, starts_with("Abundanc")) %>%
+  #remove empty 3 channels 
+  dplyr::select(!contains(c("127C", "130N", "133N"))) 
+  
+
+dim(high_confi_no_contam)
+
+#save the accession, but remove from data frame
+accession <- high_confi_no_contam [1:2]
+data_only <- as.data.frame(high_confi_no_contam[3:106])
+#attach accession as the row names of the data
+row.names(data_only) <- accession$Accession
+head(data_only)
+dim(data_only)
+
+#plot non-normalized data
+boxplot(log2(data_only), col = rep(c('red', 'green', 'blue', "magenta", "pink","black", "light blue", "light green"), each =13), notch = TRUE)
+
+plotDensities(log2(data_only), col = rep(c("red", "green", "blue", "pink","orange","yellow","purple","grey"), each = 13), main = "Raw MQ data", legend = FALSE)
+
+```
+
+```{r}
+#bring in sample matrix
+#load sample data
+sampledata <- read_tsv("data/sampledata_fibres.txt", col_names = TRUE)
+
+sampledata <- as.data.frame(sampledata)
+rownames(sampledata) <- sampledata$newsamplename
+sampledata <- sampledata %>% separate(newsamplename, c("subject", "training", "time", "fibre"))
+```
+
+```{r}
+#There were issues with the reference channels and so they were removed, and normalisation below was introduced to compensate. 
+
+data_only2 <- data_only %>%
+  # select normalized abundance reporter ion intensity
+  dplyr::select(starts_with("Abundanc")) %>%
+  #remove reference channels 
+  dplyr::select(!contains(c("126")))
+
+boxplot(log2(data_only2), col = rep(c("red", "green", "blue", "pink","orange","yellow","purple","grey"), each =12), notch = TRUE, horizontal = TRUE)
+
+plotDensities(log2(data_only2), col = rep(c("red", "green", "blue", "pink","orange","yellow","purple","grey"), each = 13), main = "Raw MQ data")
+
+#remove repeats and bad samples
+data_only2 <- data_only2[-c(47,48,88,90,61,87)]
+```
+
+#presence/abs graph
+```{r}
+presabs <- data_only2
+presabs[presabs > 0] <- 1
+presabs[is.na(presabs)] <- 0
+
+Heatmap(presabs, show_row_names = FALSE, show_row_dend = FALSE)
+```
+
+```{r}
+#remove large missing data and impute the rest
+data_raw<- data_only2
+data_raw <- data_raw[-which(rowMeans(is.na(data_raw)) > 0.30),]
+data_raw <- as.matrix(data_raw)
+data_raw_impute <- impute.knn(data_raw)
+data_raw_impute <- data_raw_impute[[1]]
+
+data_raw <- as.data.frame(data_raw_impute)
+```
+
+```{r}
+#still do SL norm first 
+# check the column totals (per channel sums)
+format(round(colSums(data_raw, na.rm = TRUE), digits = 0), big.mark = ",")
+
+# sample loading normalization
+exp1_raw <- data_raw[c(1:12)]
+exp2_raw <- data_raw[c(13:24)]
+exp3_raw <- data_raw[c(25:36)]
+exp4_raw <- data_raw[c(37:46)]
+exp5_raw <- data_raw[c(47:58)]
+exp6_raw <- data_raw[c(59:69)]
+exp7_raw <- data_raw[c(70:81)]
+exp8_raw <- data_raw[c(82:90)]
+
+data_no_na<- cbind(exp1_raw,exp2_raw,exp3_raw,exp4_raw,exp5_raw,exp6_raw,exp7_raw, exp8_raw)
+data_no_na<- na.omit(data_no_na)
+dim(data_no_na)
+exp1_raw <- data_raw[c(1:12)]
+exp2_raw <- data_raw[c(13:24)]
+exp3_raw <- data_raw[c(25:36)]
+exp4_raw <- data_raw[c(37:46)]
+exp5_raw <- data_raw[c(47:58)]
+exp6_raw <- data_raw[c(59:69)]
+exp7_raw <- data_raw[c(70:81)]
+exp8_raw <- data_raw[c(82:90)]
+
+exp1_raw <- exp1_for_sl
+exp2_raw <- exp2_for_sl
+exp3_raw <- exp3_for_sl
+exp4_raw <- exp4_for_sl
+exp5_raw <- exp5_for_sl
+exp6_raw <- exp6_for_sl
+exp7_raw <- exp7_for_sl
+exp8_raw <- exp8_for_sl
+
+# first basic normalization is to adjust each TMT experiment to equal signal per channel
+# figure out the global scaling value
+target <- mean(c(colSums(exp1_raw,na.rm = T), colSums(exp2_raw,na.rm = T), colSums(exp3_raw,na.rm = T), colSums(exp4_raw,na.rm = T),
+                 colSums(exp5_raw,na.rm = T),colSums(exp6_raw,na.rm = T),colSums(exp7_raw,na.rm = T),colSums(exp8_raw,na.rm = T)))
+# do the sample loading normalization before the IRS normalization
+# there is a different correction factor for each column
+norm_facs <- target / colSums(exp1_raw, na.rm = T)
+exp1_sl <- sweep(exp1_raw, 2, norm_facs, FUN = "*")
+norm_facs <- target / colSums(exp2_raw, na.rm = T)
+exp2_sl <- sweep(exp2_raw, 2, norm_facs, FUN = "*")
+norm_facs <- target / colSums(exp3_raw, na.rm = T)
+exp3_sl <- sweep(exp3_raw, 2, norm_facs, FUN = "*")
+norm_facs <- target / colSums(exp4_raw, na.rm = T)
+exp4_sl <- sweep(exp4_raw, 2, norm_facs, FUN = "*")
+norm_facs <- target / colSums(exp5_raw, na.rm = T)
+exp5_sl <- sweep(exp5_raw, 2, norm_facs, FUN = "*")
+norm_facs <- target / colSums(exp6_raw, na.rm = T)
+exp6_sl <- sweep(exp6_raw, 2, norm_facs, FUN = "*")
+norm_facs <- target / colSums(exp7_raw, na.rm = T)
+exp7_sl <- sweep(exp7_raw, 2, norm_facs, FUN = "*")
+norm_facs <- target / colSums(exp8_raw, na.rm = T)
+exp8_sl <- sweep(exp8_raw, 2, norm_facs, FUN = "*")
+
+# make a pre-IRS data frame after sample loading normalizations
+data_sl <- cbind(exp1_sl, exp2_sl, exp3_sl, exp4_sl, exp5_sl, exp6_sl, exp7_sl, exp8_sl)
+
+boxplot(log2(data_sl), col = rep(c("red", "green", "blue", "pink","orange","yellow","purple","grey"), each = 12), notch = TRUE)
+plotDensities(log2(data_sl), col = rep(c("red", "green", "blue", "pink","orange","yellow","purple","grey"), each = 12), main = "Raw MQ data")
+```
+
+
+```{r}
+#combat step
+sampledata$training <- factor(sampledata$training)
+mod <- model.matrix(~ training, data = sampledata)
+batch <- sampledata$batch
+
+# run ComBat as alternative to IRS
+# NOTE: SL norm is probably better to do before applying the batch corection
+data_combat <- ComBat_seq(counts = as.matrix(data_sl), batch = batch)
+data_combat <- as.data.frame(data_combat)
+par(mfrow = c(1, 1)) # any plotting in the ComBat call leaves plots as 2x2
+
+# ComBat introduces some negative corrected counts that we need to fix
+#data_combat <-  data_combat[apply(data_combat, 1, function(x) all(x >= 0)), ] 
+
+boxplot(log2(data_combat), notch = TRUE, col = rep(c("red", "green", "blue", "pink","orange","yellow","purple","grey"), each = 12), 
+        main = "ComBat batch correction of SL data\nExp1 (red), Exp2 (green), Exp3 (blue)",
+        xlab = 'TMT Sample', ylab = 'log2 of Intensity')
+
+plotDensities(log2(data_combat), col = rep(c("red", "green", "blue", "pink","orange","yellow","purple","grey"), 12), main = "ComBat data")
+```
+
+
+```{r}
+#apply TMM afterwards 
+format(round(colSums(data_combat), digits = 0), big.mark = ",")
+
+# apply TMM normalization to the ComBat-corrected data
+combat_tmm <- calcNormFactors(data_combat)
+data_combat_tmm <- sweep(data_combat, 2, combat_tmm, FUN = "/")
+
+# look at the box plots
+boxplot(log2(data_combat_tmm), notch = TRUE, col = rep(c("red", "green", "blue", "pink","orange","yellow","purple","grey"), each = 12), 
+        main = "ComBat batch corrected with TMM\nExp1 (red), Exp2 (green), Exp3 (blue)",
+        xlab = 'TMT Sample', ylab = 'log2 of Intensity')
+
+# can also look at density plots (like a distribution histogram)
+plotDensities(log2(data_combat_tmm), col = rep(c("red", "green", "blue", "pink","orange","yellow","purple","grey"), 12), main = "ComBat/TMM data")
+
+
+# ggsave(
+#   "results/densityplot.pdf",
+#   plotDensities(log2(data_combat_tmm), col = rep(c("red", "green", "blue", "pink","orange","yellow","purple","grey"), 12), main = "ComBat/TMM data",  legend = FALSE),
+#   width = 10,
+#   height = 9,
+#   dpi = 300,
+#   useDingbats=FALSE
+# )
+```
+
+

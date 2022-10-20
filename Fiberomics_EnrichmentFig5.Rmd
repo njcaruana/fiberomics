@@ -1,0 +1,133 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r} 
+pacman::p_load("tidyverse","readxl","stringr","limma", "edgeR", "gplots", "ggplot2","ComplexHeatmap","dendextend","vsn", "circlize",  "Homo.sapiens", "AnnotationDbi", "tidyHeatmap", "openxlsx", "enrichplot", "clusterProfiler")
+```
+
+#Need to run Fibreomics_PostFibreComparisons first
+
+```{r}
+all_genes_M <- comp_M_POST_IvII$uniprot
+diff_genes_M <- subset(comp_M_POST_IvII, adj.P.Val < 0.05)
+diff_genes_M <- diff_genes_M$uniprot
+
+all_genes_S <- comp_S_POST_IvII$uniprot
+diff_genes_S <- subset(comp_M_POST_IvII, adj.P.Val < 0.05)
+diff_genes_S <- diff_genes_S$uniprot
+```
+
+```{r}
+mydf_testM <- comp_M_POST_IvII
+mydf_testM <- mydf_testM[c(1,2)]
+mydf_testM$exercise <- "MICT"
+mydf_testM$fibre <- "I"
+mydf_testM$fibre[(mydf_testM$logFC) > 0] <- "II"
+
+
+mydf_testS <- comp_S_POST_IvII
+mydf_testS <- mydf_testS[c(1,2)]
+mydf_testS$exercise <- "SIT"
+mydf_testS$fibre <- "I"
+mydf_testS$fibre[(mydf_testS$logFC) > 0] <- "II"
+
+merged <- rbind(mydf_testS, mydf_testM)
+
+enrichkey <- merged$uniprot
+enrichdict <- AnnotationDbi::select(Homo.sapiens, keys=key, columns=c("ENTREZID", "SYMBOL", "GENEID"), keytype = "UNIPROT")
+enrichdict <- enrichdict[!duplicated(enrichdict$UNIPROT), ]
+enrichmerge<- merge(merged, enrichdict, by.x = "uniprot", by.y = "UNIPROT")
+
+```
+
+```{r}
+comp_M_POST_IvII_posthoc$uniprot <- rownames(comp_M_POST_IvII_posthoc)
+mydf_testM <- comp_M_POST_IvII_posthoc
+mydf_testM <- mydf_testM[c(1,7)]
+mydf_testM$exercise <- "MICT"
+mydf_testM$fibre <- "I"
+mydf_testM$fibre[(mydf_testM$logFC) > 0] <- "II"
+
+comp_S_POST_IvII_posthoc$uniprot <- rownames(comp_S_POST_IvII_posthoc)
+mydf_testS <- comp_S_POST_IvII_posthoc
+mydf_testS <- mydf_testS[c(1,7)]
+mydf_testS$exercise <- "SIT"
+mydf_testS$fibre <- "I"
+mydf_testS$fibre[(mydf_testS$logFC) > 0] <- "II"
+
+merged <- rbind(mydf_testS, mydf_testM)
+
+enrichkey <- merged$uniprot
+enrichdict <- AnnotationDbi::select(Homo.sapiens, keys=key, columns=c("ENTREZID", "SYMBOL"), keytype = "UNIPROT")
+enrichdict <- enrichdict[!duplicated(enrichdict$UNIPROT), ]
+enrichmerge<- merge(merged, enrichdict, by.x = "uniprot", by.y = "UNIPROT")
+
+```
+
+```{r}
+formula_res2 <- compareCluster(ENTREZID~exercise+fibre, data=enrichmerge, fun="enrichWP", organism = "Homo sapiens") 
+
+dotplot(formula_res2, showCategory=15, by = "count") + facet_grid(.~exercise, scale="free")
+```
+
+## functional annotation test
+
+```{r}
+OG <- formula_res2@compareClusterResult
+testdata <- formula_res2@compareClusterResult
+
+#subset to test
+#testdata <- testdata[c(7:8),]
+testdata <- as.data.frame(testdata)
+testdata2 <- testdata[c(2,3,5,11)]
+
+nmax <- max(stringr::str_count(testdata2$geneID, "/")) + 1
+testdata2 <- tidyr::separate(testdata2, geneID, paste0("col", seq_len(nmax)), sep = "/", fill = "right")
+
+testdata3 <- testdata2 %>% gather(Column, geneID, -"Description", -"exercise", -"fibre")
+testdata3 <- na.omit(testdata3)
+testdata3 <- testdata3 %>% unite("Cluster", 1:2, sep = ".")
+
+#info
+testinfo <- enrichmerge
+testinfo <- testinfo %>% unite("Cluster", 3:4, sep = ".")
+
+testmerge <- merge(testinfo, testdata3, by.x=c("ENTREZID", "Cluster"), by.y = c("geneID","Cluster"))  
+
+avgtest <- testmerge %>% group_by(Description, Cluster) %>% summarize(avglog = mean(logFC))
+
+avgmerge <- merge(avgtest, testdata, by=c("Description", "Cluster" ))
+avgmerge <- as.data.frame(avgmerge)
+avgmerge <- avgmerge[order(avgmerge$Cluster),]
+
+formula_res2@compareClusterResult <- avgmerge
+
+dotplot(formula_res2, showCategory = 10, color = "avglog", by = "count") + scale_color_gradient2(low = "blue",high = "red")
+
+
+geneidtosymbol <- avgmerge
+geneidtosymbol <- geneidtosymbol[c(1,2,12)]
+nmax <- max(stringr::str_count(geneidtosymbol$geneID, "/")) + 1
+geneidtosymbol <- tidyr::separate(geneidtosymbol, geneID, paste0("col", seq_len(nmax)), sep = "/", fill = "right")
+geneidtosymbol <-  geneidtosymbol %>% gather(Column, geneID, -"Description", -"Cluster")
+geneidtosymbol <- na.omit(geneidtosymbol)
+geneidtosymbol <- merge(geneidtosymbol, testinfo, by.x = c("geneID","Cluster"), by.y = c("ENTREZID","Cluster"))
+geneidtosymbol <- geneidtosymbol[c(2,3,7)]
+geneidtosymbol2 <- geneidtosymbol %>% group_by(Description, Cluster) %>% summarise(SYMBOL = paste(unique(SYMBOL), collapse = "/" ))
+
+
+mergedsymbols <- merge(geneidtosymbol2, avgmerge)
+#dropgeneID
+mergedsymbols <- mergedsymbols[-c(13)]
+colnames(mergedsymbols)[3] <- "geneID"
+
+formula_res2@compareClusterResult <- mergedsymbols
+
+cnetplot(formula_res2, showCategory = c("Aerobic glycolysis", "Amino acid metabolism", "Striated muscle contraction pathway", "Fatty acid beta-oxidation", "Glycogen synthesis and degradation", "Glycolysis and gluconeogenesis", "Cori cycle", "TCA cycle (aka Krebs or citric acid cycle)"))
+
+```
+
